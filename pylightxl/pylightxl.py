@@ -522,6 +522,9 @@ def readxl_scrape(fn, fn_ws, sharedString, styles, comments):
         elif cell_val == '' or cell_type == 'str' or cell_type == 'e':
             # cell is either empty, or is a str formula - leave cell_val as a string
             pass
+        elif cell_type == 'd' and '-' in cell_val:
+            # date already formatted as string
+            pass
         else:
             # int or float
             test_cell = cell_val if '-' not in cell_val else cell_val[1:]
