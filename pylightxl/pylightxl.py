@@ -506,6 +506,17 @@ def readxl_scrape(fn, fn_ws, sharedString, styles, comments):
         cell_style = int(tag_cell.get('s')) if tag_cell.get('s') is not None else 0
         tag_val = tag_cell.find('./default:v', ns)
         cell_val = tag_val.text or '' if tag_val is not None else ''
+
+        if cell_type == 'inlineStr':
+            tag_is = tag_cell.find('./default:is', ns)
+            if tag_is is not None:
+                tag_t = tag_is.findall('./default:r//default:t', ns)
+                if tag_t:
+                    cell_val = ''.join([tag.text for tag in tag_t if tag.text])
+                else:
+                    tag_t_single = tag_is.find('./default:t', ns)
+                    cell_val = tag_t_single.text if tag_t_single is not None and tag_t_single.text else ''
+
         tag_formula = tag_cell.find('./default:f', ns)
         cell_formula = tag_formula.text or '' if tag_formula is not None else ''
         comment = comments[cell_address] if cell_address in comments.keys() else ''
@@ -520,6 +531,9 @@ def readxl_scrape(fn, fn_ws, sharedString, styles, comments):
         elif cell_type == 'b':
             # bool
             cell_val = True if cell_val == '1' else False
+        elif cell_type == 'inlineStr':
+            # already extracted above from <is> element
+            pass
         elif cell_val == '' or cell_type == 'str' or cell_type == 'e':
             # cell is either empty, or is a str formula - leave cell_val as a string
             pass
