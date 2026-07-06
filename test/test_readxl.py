@@ -1,6 +1,6 @@
 # standard lib imports
 from unittest import TestCase
-import os, sys
+import os, sys, io, zipfile
 
 # 3rd party lib support
 
@@ -715,3 +715,178 @@ class TestConversion(TestCase):
         self.assertEqual('PZD', xl.utility_num2columnletters(11496))
         self.assertEqual('QGK', xl.utility_num2columnletters(11685))
         self.assertEqual('XFD', xl.utility_num2columnletters(16384))
+
+
+class TestSuezMalformedNamespace(TestCase):
+    """Regression tests for xlsx files exported by the Suez waste-management portal.
+
+    These files differ from Excel/openpyxl output in ways that used to crash readxl with
+    "TypeError: expected string or bytes-like object, got 'NoneType'":
+      (a) the main namespace uses an explicit x: prefix with no default xmlns;
+      (b) xmlns:r is declared on the <sheet> child element, not on the workbook root;
+      (c) relationship Ids are non-numeric-prefixed (e.g. R337e9b6cf54e4885);
+      (d) rels Targets are absolute /xl/... paths.
+
+    utility_xml_namespace only reads namespaces up to the root element, so quirk (b) meant
+    the returned ns dict had no "r" key. readxl_get_workbook's r:id lookup then fell through
+    to a plain "id" attribute that does not exist, leaving rId=None and crashing re.sub.
+    """
+
+    RELATIONSHIPS_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+    MAIN_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+
+    @staticmethod
+    def _build_suez_xlsx(path, include_rid=True):
+        """Write a minimal Suez-style .xlsx to path. Set include_rid=False to omit the
+        r:id (and any plain id) on the sheet, making the relationship unresolvable."""
+        # xmlns:r is always declared on <x:sheet> (never the root) to mirror the real files
+        sheet_tag = ('<x:sheet name="My Transports" sheetId="1" '
+                     + ('r:id="R337e9b6cf54e4885" ' if include_rid else '')
+                     + 'xmlns:r="' + TestSuezMalformedNamespace.RELATIONSHIPS_NS + '" />')
+        parts = {
+            '[Content_Types].xml':
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                '<Default Extension="xml" ContentType="application/xml"/>'
+                '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+            '_rels/.rels':
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+            'xl/workbook.xml':
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<x:workbook xmlns:x="' + TestSuezMalformedNamespace.MAIN_NS + '"><x:sheets>'
+                + sheet_tag +
+                '</x:sheets></x:workbook>',
+            # Target is absolute (/xl/...); readxl_get_workbookxmlrels strips the leading /xl/
+            'xl/_rels/workbook.xml.rels':
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="R337e9b6cf54e4885" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="/xl/worksheets/sheet.xml"/></Relationships>',
+            'xl/worksheets/sheet.xml':
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<worksheet xmlns="' + TestSuezMalformedNamespace.MAIN_NS + '"><sheetData>'
+                '<row r="1"><c r="A1" t="inlineStr"><is><t>Customer</t></is></c>'
+                '<c r="B1" t="inlineStr"><is><t>Order number</t></is></c></row>'
+                '<row r="2"><c r="A2" t="inlineStr"><is><t>ACME</t></is></c>'
+                '<c r="B2" t="inlineStr"><is><t>PO-1</t></is></c></row>'
+                '</sheetData></worksheet>',
+        }
+        with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
+            for name, data in parts.items():
+                z.writestr(name, data)
+
+    @staticmethod
+    def _build_plain_id_xlsx(path):
+        """Write a minimal xlsx mimicking openpyxl output that does not declare the "r"
+        relationship schema: the <sheet> carries a plain, unnamespaced id attribute."""
+        parts = {
+            '[Content_Types].xml':
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                '<Default Extension="xml" ContentType="application/xml"/>'
+                '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+            '_rels/.rels':
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+            # default xmlns is the main ns, no xmlns:r anywhere, sheet uses a plain id attribute
+            'xl/workbook.xml':
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<workbook xmlns="' + TestSuezMalformedNamespace.MAIN_NS + '"><sheets>'
+                '<sheet name="Sheet1" sheetId="1" id="rId1" /></sheets></workbook>',
+            'xl/_rels/workbook.xml.rels':
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+            'xl/worksheets/sheet1.xml':
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<worksheet xmlns="' + TestSuezMalformedNamespace.MAIN_NS + '"><sheetData>'
+                '<row r="1"><c r="A1" t="inlineStr"><is><t>Hello</t></is></c></row>'
+                '</sheetData></worksheet>',
+        }
+        with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
+            for name, data in parts.items():
+                z.writestr(name, data)
+
+    def setUp(self):
+        self.fn = './suez_style.xlsx'
+        self.fn_no_rid = './suez_style_no_rid.xlsx'
+        self.fn_plain_id = './openpyxl_plain_id.xlsx'
+        self._build_suez_xlsx(self.fn)
+
+    def tearDown(self):
+        for p in (self.fn, self.fn_no_rid, self.fn_plain_id):
+            if os.path.isfile(p):
+                os.remove(p)
+
+    def test_namespace_r_declared_on_child_is_surfaced(self):
+        # xmlns:r declared only on the <x:sheet> child (not the root); utility_xml_namespace
+        # only sees up-to-root namespaces, so it must default the well-known "r" URI.
+        workbook_xml = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<x:workbook xmlns:x="' + self.MAIN_NS + '"><x:sheets>'
+            '<x:sheet name="My Transports" sheetId="1" r:id="R337e9b6cf54e4885" '
+            'xmlns:r="' + self.RELATIONSHIPS_NS + '" /></x:sheets></x:workbook>'
+        )
+        ns = xl.utility_xml_namespace(io.BytesIO(workbook_xml.encode('utf-8')))
+        self.assertEqual(self.RELATIONSHIPS_NS, ns['r'])
+
+    def test_namespace_r_declared_on_root_is_preserved(self):
+        # When "r" IS declared at the root, its value must be preserved, not overwritten by
+        # the default. A deliberately distinct URI proves the default branch is skipped.
+        custom_r = 'urn:pylightxl-test:custom-root-r'
+        workbook_xml = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<workbook xmlns="' + self.MAIN_NS + '" xmlns:r="' + custom_r + '"><sheets>'
+            '<sheet name="Sheet1" sheetId="1" r:id="rId1" /></sheets></workbook>'
+        )
+        ns = xl.utility_xml_namespace(io.BytesIO(workbook_xml.encode('utf-8')))
+        self.assertEqual(custom_r, ns['r'])
+
+    def test_readxl_parses_suez_shape(self):
+        # Direct regression guard for the TypeError: the full read must succeed and the
+        # inline-string cell data must round-trip.
+        db = xl.readxl(self.fn)
+        self.assertEqual(['My Transports'], db.ws_names)
+        ws = db.ws('My Transports')
+        self.assertEqual(['Customer', 'Order number'], ws.row(1))
+        self.assertEqual(['ACME', 'PO-1'], ws.row(2))
+
+    def test_nonnumeric_prefixed_rid_orders_correctly(self):
+        # r:id="R337e9b6cf54e4885" exercises the re.sub('[^0-9]', '', rId) path: the leading
+        # "R" and hex letters are stripped, leaving the digits -> 33796544885.
+        rv = xl.readxl_get_workbook(self.fn)
+        self.assertIn('My Transports', rv['ws'])
+        entry = rv['ws']['My Transports']
+        self.assertEqual('R337e9b6cf54e4885', entry['rId'])
+        self.assertEqual(33796544885, entry['order'])
+        self.assertIsInstance(entry['order'], int)
+        # the absolute /xl/... Target must be resolved to a relative worksheet path
+        self.assertEqual('worksheets/sheet.xml', entry['fn_ws'])
+
+    def test_missing_rid_is_unresolvable(self):
+        # Boundary: no r:id and no plain "id" leaves rId genuinely unresolvable. Upstream
+        # behavior is to raise (TypeError from re.sub(None)); the downstream backend wraps
+        # this with a friendly "re-save in Excel" message.
+        self._build_suez_xlsx(self.fn_no_rid, include_rid=False)
+        with self.assertRaises(TypeError):
+            xl.readxl_get_workbook(self.fn_no_rid)
+
+    def test_plain_id_fallback_resolves_relationship(self):
+        # openpyxl edge case: no "r" schema, sheet carries a plain unnamespaced id. Part 1
+        # now always populates ns['r'], so the namespaced lookup returns None here; the
+        # explicit None check (Part 2) must fall back to the plain "id" attribute. Without
+        # it this file would regress to the same NoneType TypeError.
+        self._build_plain_id_xlsx(self.fn_plain_id)
+        rv = xl.readxl_get_workbook(self.fn_plain_id)
+        self.assertIn('Sheet1', rv['ws'])
+        self.assertEqual('rId1', rv['ws']['Sheet1']['rId'])
+        self.assertEqual(1, rv['ws']['Sheet1']['order'])
+        db = xl.readxl(self.fn_plain_id)
+        self.assertEqual(['Sheet1'], db.ws_names)
+        self.assertEqual(['Hello'], db.ws('Sheet1').row(1))
