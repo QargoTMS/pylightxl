@@ -2344,4 +2344,12 @@ def utility_xml_namespace(file):
     ns = dict(ns_map)
     if 'default' not in ns.keys():
         ns['default'] = ns['x']
+    if "r" not in ns.keys():
+        # The "r" (relationship) namespace is a fixed OOXML constant, but it
+        # is not always captured here: some exporters (e.g. the Suez portal)
+        # declare xmlns:r on a child element (such as <sheet>) rather than
+        # on the root, and this parser only reads namespaces up to the root.
+        # Default it to the well-known URI so callers can always resolve r:id
+        # attributes.
+        ns["r"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
     return ns
